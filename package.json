@@ -1,0 +1,55 @@
+{
+  "name": "pulsea.db",
+  "version": "0.0.5",
+  "description": "A secure, multi-format database with built-in encryption, data validation, and automatic backups.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "easy database",
+    "local database",
+    "local-storage",
+    "database",
+    "encrypted-storage",
+    "yaml-database",
+    "json-database",
+    "sql-database",
+    "discord.js",
+    "multi-format",
+    "data-validation",
+    "schema-validation",
+    "backup-restore",
+    "key-value-store",
+    "nosql",
+    "secure-storage",
+    "table-relations",
+    "query-builder",
+    "nodejs-database",
+    "k9crypt"
+  ],
+  "author": {
+    "name": "Pulsea Team",
+    "email": "pulsea@mail.com",
+    "url": "https://github.com/pulseainc"
+  },
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pulseainc/pulsea.db.git"
+  },
+  "bugs": {
+    "url": "https://github.com/pulseainc/pulsea.db/issues"
+  },
+  "homepage": "https://github.com/pulseainc",
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/pulseainc"
+  },
+  "dependencies": {
+    "fs": "0.0.1-security",
+    "js-yaml": "^4.1.0",
+    "k9crypt": "^1.0.6",
+    "zlib": "^1.0.5"
+  }
+}
