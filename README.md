@@ -3,6 +3,21 @@
 
 A secure, multi-format database with built-in encryption, data validation, and automatic backups.
 
+## Updates
+
+- Added UPSERT operation for inserting or updating records based on unique columns
+- Implemented bulk insert functionality for efficient multiple record insertion
+- Added support for aggregate functions (SUM, AVG, COUNT) with WHERE conditions
+- Introduced EXISTS operator for checking record existence
+- Added Find and Count operation for paginated results with total count
+- Implemented GROUP BY functionality for data aggregation
+- Added UNION operation to combine results from multiple queries
+- Introduced LIKE operator for pattern matching in string searches
+- Added IN operator for filtering records by a list of values
+- Enhanced table operations with better validation and error handling
+- Improved data consistency with transaction-like operations
+- Added comprehensive test coverage for all new features
+
 ## Features
 
 - 🔐 **Secure Storage**: Built-in encryption for sensitive data
@@ -84,6 +99,87 @@ const users = await db.query('users', {
     limit: 10,
     offset: 0
 });
+```
+
+## Operations
+
+PulseaDB supports MySQL-like operations for more complex data manipulation:
+
+#### UPSERT
+Insert or update records based on unique columns:
+```javascript
+await db.upsert('users', 
+    { email: 'john@example.com', name: 'John Doe', age: 30 },
+    ['email']  // unique columns
+);
+```
+
+#### Bulk Insert
+Insert multiple records efficiently:
+```javascript
+await db.insertMany('orders', [
+    { userId: '1', amount: 100, status: 'completed' },
+    { userId: '1', amount: 150, status: 'completed' },
+    { userId: '1', amount: 200, status: 'pending' }
+]);
+```
+
+#### Aggregate Functions
+Perform calculations on data with conditions:
+```javascript
+const stats = await db.aggregate('orders', {
+    functions: [
+        { name: 'sum', column: 'amount', alias: 'total_sales' },
+        { name: 'avg', column: 'amount', alias: 'average_order' },
+        { name: 'count', column: '*', alias: 'order_count' }
+    ],
+    where: { status: 'completed' }
+});
+```
+
+#### EXISTS
+Check for record existence:
+```javascript
+const hasActiveUsers = await db.exists('users', { status: 'active' });
+```
+
+#### Find and Count
+Get paginated results with total count:
+```javascript
+const { rows, count } = await db.findAndCount('orders', {
+    where: { userId: '1' },
+    orderBy: 'amount desc'
+});
+```
+
+#### GROUP BY
+Group and aggregate data:
+```javascript
+const groupedOrders = await db.groupBy('orders', {
+    columns: ['status'],
+    where: { userId: '1' }
+});
+```
+
+#### UNION
+Combine results from multiple queries:
+```javascript
+const unionResults = await db.union([
+    { tableName: 'orders', columns: ['status'], where: { amount: { $gt: 150 } } },
+    { tableName: 'orders', columns: ['status'], where: { amount: { $lt: 120 } } }
+]);
+```
+
+#### LIKE
+Pattern matching for string searches:
+```javascript
+const emailSearch = await db.like('users', 'email', '%@example.com');
+```
+
+#### IN
+Filter by a list of values:
+```javascript
+const statusSearch = await db.in('orders', 'status', ['completed', 'pending']);
 ```
 
 ## Detailed API Reference
@@ -184,6 +280,32 @@ await db.delete('user.preferences.theme');
 - Cleans up empty parent objects
 - Returns boolean indicating success
 - Auto-saves if enabled
+
+##### `info()`
+Retrieves detailed information about the database file.
+```javascript
+const info = await db.info();
+
+console.log('🚀 Database Information:');
+console.log('----------------------------');
+console.log('📂 File Path:', dbInfo.databasePath);
+console.log('📄 File Format:', dbInfo.fileFormat);
+console.log('📊 File Size:');
+console.log('   - Bytes:', dbInfo.fileSize.bytes);
+console.log('   - Kilobytes:', dbInfo.fileSize.kilobytes);
+console.log('   - Megabytes:', dbInfo.fileSize.megabytes);
+console.log('🕒 Last Modified:', dbInfo.lastModified);
+console.log('📋 Tables:');
+console.log('   - Total Table Count:', dbInfo.tables.count);
+console.log('   - Table Details:', JSON.stringify(dbInfo.tables.details, null, 2));
+console.log('🔢 Total Record Count:', dbInfo.totalRecordCount);
+console.log('💾 Backups:');
+console.log('   - Backup Count:', dbInfo.backups.count);
+console.log('   - Latest Backup:', dbInfo.backups.latestBackup);
+console.log('🔒 Encryption:', JSON.stringify(dbInfo.encryption, null, 2));
+console.log('💾 Auto Save:', dbInfo.autoSave);
+console.log('🐛 Debug Mode:', dbInfo.debugMode);
+```
 
 ### Backup Operations
 

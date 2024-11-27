@@ -91,6 +91,48 @@ class PulseaDB {
         }
     }
 
+    async info() {
+        await this.ensureInitialized();
+
+        const stats = await fs.promises.stat(this.filePath);
+        const fileSizeInBytes = stats.size;
+        const fileSizeInKB = (fileSizeInBytes / 1024).toFixed(2);
+        const fileSizeInMB = (fileSizeInBytes / (1024 * 1024)).toFixed(2);
+        const lastModified = stats.mtime;
+        const tables = await this.listTables();
+        const totalRecordCount = tables.reduce((sum, table) => sum + table.rowCount, 0);
+        const latestBackup = this.findLatestBackup();
+        const backupCount = fs.readdirSync(this.backupDir)
+            .filter(file => file.startsWith('backup-') && file.endsWith(`.${this.fileFormat}`)).length;
+
+        return {
+            databasePath: this.filePath,
+            fileFormat: this.fileFormat,
+            fileSize: {
+                bytes: fileSizeInBytes,
+                kilobytes: fileSizeInKB,
+                megabytes: fileSizeInMB
+            },
+            lastModified: lastModified.toISOString(),
+            tables: {
+                count: tables.length,
+                details: tables
+            },
+            totalRecordCount,
+            backups: {
+                count: backupCount,
+                latestBackup: latestBackup,
+                backupDirectory: this.backupDir
+            },
+            encryption: {
+                enabled: true,
+                method: 'K9Crypt'
+            },
+            autoSave: this.autoSave,
+            debugMode: this.debug
+        };
+    }
+
     async load() {
         try {
             const fileContent = await fs.promises.readFile(this.filePath, 'utf8');
@@ -840,7 +882,8 @@ class PulseaDB {
         const meta = this.data[tableName]?._meta;
         if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
 
-        await this.delete(tableName);
+        delete this.data[tableName];
+        if (this.autoSave) await this.save();
         return true;
     }
 
@@ -925,6 +968,539 @@ class PulseaDB {
             clearInterval(this.backupIntervalId);
             this.backupIntervalId = null;
         }
+    }
+
+    async select(tableName, { columns = ['*'], where = {}, orderBy = null, limit = null, offset = 0 } = {}) {
+        await this.ensureInitialized();
+        const meta = this.data[tableName]?._meta;
+        if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
+
+        let results = await this.query(tableName, { where, orderBy, limit, offset });
+
+        if (columns[0] !== '*') {
+            results = results.map(row => {
+                const selectedColumns = {};
+                columns.forEach(col => {
+                    if (row.hasOwnProperty(col)) {
+                        selectedColumns[col] = row[col];
+                    }
+                });
+                return selectedColumns;
+            });
+        }
+
+        return results;
+    }
+
+    async insert(tableName, data) {
+        await this.ensureInitialized();
+        const meta = this.data[tableName]?._meta;
+        if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
+
+        const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        await this.validateTableData(tableName, data);
+        await this.set(`${tableName}.${id}`, data);
+
+        return { id, ...data };
+    }
+
+    async insertMany(tableName, dataArray) {
+        if (!Array.isArray(dataArray)) {
+            throw new DatabaseError('Data must be an array');
+        }
+
+        const results = [];
+        for (const data of dataArray) {
+            const result = await this.insert(tableName, data);
+            results.push(result);
+        }
+
+        return results;
+    }
+
+    async updateMany(tableName, where = {}, updates) {
+        const results = await this.query(tableName, { where });
+        const updatedRows = [];
+
+        for (const row of results) {
+            const updated = await this.update(`${tableName}.${row.id}`, updates);
+            updatedRows.push(updated);
+        }
+
+        return updatedRows;
+    }
+
+    async delete(tableName, where = {}) {
+        if (typeof tableName === 'string' && !where) {
+            return super.delete(tableName);
+        }
+
+        const results = await this.query(tableName, { where });
+        const deletedCount = results.length;
+
+        for (const row of results) {
+            await this.delete(`${tableName}.${row.id}`);
+        }
+
+        return { deletedCount };
+    }
+
+    async bulkDelete(tableName, where = {}) {
+        const results = await this.query(tableName, { where });
+        const deletedIds = results.map(row => row.id);
+        const deletedCount = deletedIds.length;
+
+        await Promise.all(deletedIds.map(id => super.delete(`${tableName}.${id}`)));
+
+        return { deletedCount, deletedIds };
+    }
+
+    async truncate(tableName) {
+        const meta = this.data[tableName]?._meta;
+        if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
+
+        const backup = { ...this.data[tableName] };
+        await this.delete(tableName);
+        this.data[tableName] = { _meta: backup._meta };
+        if (this.autoSave) await this.save();
+
+        return true;
+    }
+
+    async join(mainTable, joinTable, { on, type = 'INNER', select = ['*'] } = {}) {
+        if (!on || !on.from || !on.to) {
+            throw new DatabaseError('Join conditions must specify "from" and "to" columns');
+        }
+
+        const mainData = await this.getTable(mainTable);
+        const joinData = await this.getTable(joinTable);
+
+        const results = [];
+        for (const [mainId, mainRow] of Object.entries(mainData)) {
+            const matches = Object.entries(joinData).filter(([_, joinRow]) => 
+                mainRow[on.from] === joinRow[on.to]
+            );
+
+            if (matches.length > 0) {
+                matches.forEach(([joinId, joinRow]) => {
+                    const merged = {
+                        [`${mainTable}_id`]: mainId,
+                        [`${joinTable}_id`]: joinId,
+                        ...mainRow,
+                        ...Object.fromEntries(
+                            Object.entries(joinRow).map(([k, v]) => [`${joinTable}_${k}`, v])
+                        )
+                    };
+
+                    if (select[0] !== '*') {
+                        const selected = {};
+                        select.forEach(col => {
+                            if (merged.hasOwnProperty(col)) {
+                                selected[col] = merged[col];
+                            }
+                        });
+                        results.push(selected);
+                    } else {
+                        results.push(merged);
+                    }
+                });
+            } else if (type === 'LEFT' || type === 'OUTER') {
+                const merged = {
+                    [`${mainTable}_id`]: mainId,
+                    [`${joinTable}_id`]: null,
+                    ...mainRow,
+                    ...Object.fromEntries(
+                        Object.keys(joinData[Object.keys(joinData)[0]] || {})
+                            .map(k => [`${joinTable}_${k}`, null])
+                    )
+                };
+
+                if (select[0] !== '*') {
+                    const selected = {};
+                    select.forEach(col => {
+                        if (merged.hasOwnProperty(col)) {
+                            selected[col] = merged[col];
+                        }
+                    });
+                    results.push(selected);
+                } else {
+                    results.push(merged);
+                }
+            }
+        }
+
+        return results;
+    }
+
+    async describe(tableName) {
+        const meta = this.data[tableName]?._meta;
+        if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
+
+        return {
+            tableName,
+            columns: meta.columns.map(col => ({
+                name: col,
+                type: meta.validations[col]?.type || 'string',
+                constraints: meta.validations[col] || {},
+                indexed: meta.indexes.includes(col)
+            })),
+            relations: meta.relations || {},
+            created: meta.created,
+            rowCount: meta.rowCount
+        };
+    }
+
+    async showTables() {
+        return this.listTables();
+    }
+
+    async alterTable(tableName, { addColumns = [], dropColumns = [], modifyValidations = {}, addIndexes = [], dropIndexes = [] } = {}) {
+        const meta = this.data[tableName]?._meta;
+        if (!meta) throw new DatabaseError(`Table '${tableName}' does not exist`);
+
+        for (const column of addColumns) {
+            if (meta.columns.includes(column)) {
+                throw new DatabaseError(`Column '${column}' already exists in table '${tableName}'`);
+            }
+            if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(column)) {
+                throw new DatabaseError(`Invalid column name: ${column}`);
+            }
+            meta.columns.push(column);
+        }
+
+        for (const column of dropColumns) {
+            if (!meta.columns.includes(column)) {
+                throw new DatabaseError(`Column '${column}' does not exist in table '${tableName}'`);
+            }
+            meta.columns = meta.columns.filter(col => col !== column);
+            delete meta.validations[column];
+            meta.indexes = meta.indexes.filter(idx => idx !== column);
+
+            const table = this.data[tableName];
+            for (const key in table) {
+                if (key !== '_meta' && table[key]) {
+                    delete table[key][column];
+                }
+            }
+        }
+
+        for (const [column, rules] of Object.entries(modifyValidations)) {
+            if (!meta.columns.includes(column)) {
+                throw new DatabaseError(`Column '${column}' does not exist in table '${tableName}'`);
+            }
+            meta.validations[column] = rules;
+        }
+
+        for (const column of addIndexes) {
+            if (!meta.columns.includes(column)) {
+                throw new DatabaseError(`Column '${column}' does not exist in table '${tableName}'`);
+            }
+            if (!meta.indexes.includes(column)) {
+                meta.indexes.push(column);
+            }
+        }
+
+        for (const column of dropIndexes) {
+            meta.indexes = meta.indexes.filter(idx => idx !== column);
+        }
+
+        if (this.autoSave) await this.save();
+        return true;
+    }
+
+    async groupBy(tableName, { columns = [], where = {}, having = null } = {}) {
+        if (!columns.length) {
+            throw new DatabaseError('At least one column must be specified for GROUP BY');
+        }
+
+        const results = await this.query(tableName, { where });
+        const groups = new Map();
+
+        for (const row of results) {
+            const groupKey = columns.map(col => row[col]).join('|');
+            if (!groups.has(groupKey)) {
+                groups.set(groupKey, []);
+            }
+            groups.get(groupKey).push(row);
+        }
+
+        let groupedResults = Array.from(groups.entries()).map(([key, rows]) => {
+            const groupValues = {};
+            columns.forEach((col, index) => {
+                groupValues[col] = rows[0][col];
+            });
+
+            groupValues.count = rows.length;
+            
+            const numericFields = Object.keys(rows[0]).filter(
+                key => !columns.includes(key) && typeof rows[0][key] === 'number'
+            );
+
+            for (const field of numericFields) {
+                groupValues[`sum_${field}`] = rows.reduce((sum, row) => sum + (row[field] || 0), 0);
+                groupValues[`avg_${field}`] = groupValues[`sum_${field}`] / rows.length;
+                groupValues[`min_${field}`] = Math.min(...rows.map(row => row[field] || 0));
+                groupValues[`max_${field}`] = Math.max(...rows.map(row => row[field] || 0));
+            }
+
+            return groupValues;
+        });
+
+        if (having) {
+            groupedResults = groupedResults.filter(group => {
+                for (const [field, condition] of Object.entries(having)) {
+                    if (typeof condition === 'object') {
+                        if (condition.$gt !== undefined && !(group[field] > condition.$gt)) return false;
+                        if (condition.$gte !== undefined && !(group[field] >= condition.$gte)) return false;
+                        if (condition.$lt !== undefined && !(group[field] < condition.$lt)) return false;
+                        if (condition.$lte !== undefined && !(group[field] <= condition.$lte)) return false;
+                        if (condition.$eq !== undefined && group[field] !== condition.$eq) return false;
+                        if (condition.$ne !== undefined && group[field] === condition.$ne) return false;
+                    } else if (group[field] !== condition) {
+                        return false;
+                    }
+                }
+                return true;
+            });
+        }
+
+        return groupedResults;
+    }
+
+    async distinct(tableName, columns = [], where = {}) {
+        if (!columns.length) {
+            throw new DatabaseError('At least one column must be specified for DISTINCT');
+        }
+
+        const results = await this.query(tableName, { where });
+        const uniqueSet = new Set();
+
+        return results.filter(row => {
+            const key = columns.map(col => row[col]).join('|');
+            if (uniqueSet.has(key)) return false;
+            uniqueSet.add(key);
+            return true;
+        }).map(row => {
+            if (columns.length === 1) {
+                return row[columns[0]];
+            }
+            const result = {};
+            columns.forEach(col => {
+                result[col] = row[col];
+            });
+            return result;
+        });
+    }
+
+    async renameTable(oldName, newName) {
+        if (!this.data[oldName]) {
+            throw new DatabaseError(`Table '${oldName}' does not exist`);
+        }
+        if (this.data[newName]) {
+            throw new DatabaseError(`Table '${newName}' already exists`);
+        }
+        if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(newName)) {
+            throw new DatabaseError('Invalid table name. Use only letters, numbers, and underscores, starting with a letter');
+        }
+
+        this.data[newName] = this.data[oldName];
+        delete this.data[oldName];
+
+        if (this.autoSave) await this.save();
+        return true;
+    }
+
+    async union(queries) {
+        if (!Array.isArray(queries) || queries.length < 2) {
+            throw new DatabaseError('Union requires at least two queries');
+        }
+
+        const results = new Set();
+        for (const query of queries) {
+            const { tableName, columns = ['*'], where = {} } = query;
+            const queryResults = await this.select(tableName, { columns, where });
+            queryResults.forEach(row => results.add(JSON.stringify(row)));
+        }
+
+        return Array.from(results).map(row => JSON.parse(row));
+    }
+
+    async unionAll(queries) {
+        if (!Array.isArray(queries) || queries.length < 2) {
+            throw new DatabaseError('Union ALL requires at least two queries');
+        }
+
+        const results = [];
+        for (const query of queries) {
+            const { tableName, columns = ['*'], where = {} } = query;
+            const queryResults = await this.select(tableName, { columns, where });
+            results.push(...queryResults);
+        }
+
+        return results;
+    }
+
+    async orderByMultiple(tableName, { columns = [], where = {}, limit = null, offset = 0 } = {}) {
+        if (!Array.isArray(columns) || !columns.length) {
+            throw new DatabaseError('At least one ordering column must be specified');
+        }
+
+        let results = await this.query(tableName, { where });
+
+        results.sort((a, b) => {
+            for (const { column, direction = 'asc' } of columns) {
+                if (a[column] < b[column]) return direction === 'asc' ? -1 : 1;
+                if (a[column] > b[column]) return direction === 'asc' ? 1 : -1;
+            }
+            return 0;
+        });
+
+        if (offset) results = results.slice(offset);
+        if (limit) results = results.slice(0, limit);
+
+        return results;
+    }
+
+    async between(tableName, column, start, end, { inclusive = true } = {}) {
+        if (!column) throw new DatabaseError('Column name is required');
+        
+        const where = {};
+        if (inclusive) {
+            where[column] = { $gte: start, $lte: end };
+        } else {
+            where[column] = { $gt: start, $lt: end };
+        }
+
+        return this.query(tableName, { where });
+    }
+
+    async like(tableName, column, pattern) {
+        if (!column) throw new DatabaseError('Column name is required');
+        if (!pattern) throw new DatabaseError('Pattern is required');
+
+        const results = await this.query(tableName, {});
+        const regexPattern = pattern
+            .replace(/%/g, '.*')
+            .replace(/_/g, '.');
+
+        return results.filter(row => {
+            const value = String(row[column] || '');
+            return new RegExp(`^${regexPattern}$`, 'i').test(value);
+        });
+    }
+
+    async in(tableName, column, values) {
+        if (!column) throw new DatabaseError('Column name is required');
+        if (!Array.isArray(values)) throw new DatabaseError('Values must be an array');
+
+        const where = {
+            [column]: { $in: values }
+        };
+
+        return this.query(tableName, { where });
+    }
+
+    async notIn(tableName, column, values) {
+        if (!column) throw new DatabaseError('Column name is required');
+        if (!Array.isArray(values)) throw new DatabaseError('Values must be an array');
+
+        const where = {
+            [column]: { $nin: values }
+        };
+
+        return this.query(tableName, { where });
+    }
+
+    async aggregate(tableName, { functions = [], where = {} } = {}) {
+        const results = await this.query(tableName, { where });
+        const aggregations = {};
+
+        for (const func of functions) {
+            const { name, column, alias } = func;
+            const resultKey = alias || `${name}_${column}`;
+
+            switch (name.toLowerCase()) {
+                case 'sum':
+                    aggregations[resultKey] = results.reduce((sum, row) => sum + (Number(row[column]) || 0), 0);
+                    break;
+                case 'avg':
+                    aggregations[resultKey] = results.length ? 
+                        results.reduce((sum, row) => sum + (Number(row[column]) || 0), 0) / results.length : 0;
+                    break;
+                case 'min':
+                    aggregations[resultKey] = results.length ?
+                        Math.min(...results.map(row => Number(row[column]) || 0)) : null;
+                    break;
+                case 'max':
+                    aggregations[resultKey] = results.length ?
+                        Math.max(...results.map(row => Number(row[column]) || 0)) : null;
+                    break;
+                case 'count':
+                    aggregations[resultKey] = column === '*' ? results.length :
+                        results.filter(row => row[column] !== null && row[column] !== undefined).length;
+                    break;
+            }
+        }
+
+        return aggregations;
+    }
+
+    async exists(tableName, where = {}) {
+        const result = await this.findOne(tableName, where);
+        return result !== null;
+    }
+
+    async findAndCount(tableName, { where = {}, orderBy = null, limit = null, offset = 0 } = {}) {
+        const [rows, count] = await Promise.all([
+            this.query(tableName, { where, orderBy, limit, offset }),
+            this.count(tableName, where)
+        ]);
+
+        return { rows, count };
+    }
+
+    async bulkDelete(tableName, where = {}) {
+        const results = await this.query(tableName, { where });
+        const deletedIds = results.map(row => row.id);
+        const deletedCount = deletedIds.length;
+
+        await Promise.all(deletedIds.map(id => super.delete(`${tableName}.${id}`)));
+
+        return { deletedCount, deletedIds };
+    }
+
+    async findByIds(tableName, ids) {
+        if (!Array.isArray(ids)) {
+            throw new DatabaseError('IDs must be an array');
+        }
+
+        const results = [];
+        for (const id of ids) {
+            const row = await this.findById(tableName, id);
+            if (row) results.push({ id, ...row });
+        }
+
+        return results;
+    }
+
+    async upsert(tableName, data, uniqueColumns = []) {
+        if (!uniqueColumns.length) {
+            return this.insert(tableName, data);
+        }
+
+        const where = {};
+        for (const col of uniqueColumns) {
+            where[col] = data[col];
+        }
+
+        const existing = await this.findOne(tableName, where);
+        if (existing) {
+            await this.update(`${tableName}.${existing.id}`, data);
+            return { id: existing.id, ...data, _upserted: 'updated' };
+        }
+
+        const result = await this.insert(tableName, data);
+        return { ...result, _upserted: 'inserted' };
     }
 }
 
