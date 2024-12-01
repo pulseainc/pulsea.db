@@ -5,18 +5,7 @@ A secure, multi-format database with built-in encryption, data validation, and a
 
 ## Updates
 
-- Added UPSERT operation for inserting or updating records based on unique columns
-- Implemented bulk insert functionality for efficient multiple record insertion
-- Added support for aggregate functions (SUM, AVG, COUNT) with WHERE conditions
-- Introduced EXISTS operator for checking record existence
-- Added Find and Count operation for paginated results with total count
-- Implemented GROUP BY functionality for data aggregation
-- Added UNION operation to combine results from multiple queries
-- Introduced LIKE operator for pattern matching in string searches
-- Added IN operator for filtering records by a list of values
-- Enhanced table operations with better validation and error handling
-- Improved data consistency with transaction-like operations
-- Added comprehensive test coverage for all new features
+- Bug fix.
 
 ## Features
 

@@ -1,6 +1,6 @@
 {
   "name": "pulsea.db",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "description": "A secure, multi-format database with built-in encryption, data validation, and automatic backups.",
   "main": "index.js",
   "scripts": {
